@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.deps/
+output/
+profiles/
+.telegram-bot-token
+.telegram-state.json
+.telegram-state.tmp
+.openai-api-key
+.env

@@ -1,0 +1,32 @@
+{
+  "main_resume_url": "https://hh.ru/resume/8b282e8cff0d8bdb180039ed1f413839487a4b",
+  "output_dir": "output",
+  "max_vacancies": 400,
+  "max_search_pages": 100,
+  "max_applications": 400,
+  "cycle_hours": 4,
+  "minimum_score": 70,
+  "review_again_after_hours": 24,
+  "delay_seconds": 3,
+  "search_query": "python backend",
+  "search_mode": "model",
+  "include_lower_levels": true,
+  "empty_search_delay_seconds": 60,
+  "search_location": "moscow_any",
+  "search_filters": {},
+  "openai": {
+    "model": "gpt-6-luna",
+    "api_key_file": ".openai-api-key",
+    "budget_usd": 4.5,
+    "max_output_tokens": 1600,
+    "reasoning_effort": "none",
+    "timeout_seconds": 90
+  },
+  "letter_instructions_file": "letter_style.txt",
+  "telegram": {
+    "enabled": true,
+    "token_file": ".telegram-bot-token",
+    "state_file": ".telegram-state.json",
+    "allowed_username": "ugly_xddd"
+  }
+}
