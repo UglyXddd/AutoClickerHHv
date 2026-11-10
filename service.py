@@ -77,6 +77,7 @@ def _run_cycles(page, *, task, config_path, dry_run, control, on_human_required=
                 if task != "bump":
                     while control.now() < deadline and not progress.full:
                         control.checkpoint()
+                        planning_failed = False
                         try:
                             found = run_actions(page_provider() if page_provider else page, task="apply" if task == "all" else task,
                                                 config_path=config_path, dry_run=dry_run,
@@ -86,12 +87,16 @@ def _run_cycles(page, *, task, config_path, dry_run, control, on_human_required=
                             raise
                         except OpenAIError as exc:
                             LOG.error("Не удалось создать следующий поиск: %s", exc)
+                            planning_failed = True
                             found = 0
                         if progress.full or control.now() >= deadline:
                             break
                         if not found:
                             delay = config.get("empty_search_delay_seconds", 60)
-                            LOG.info("Новых вакансий в поиске нет. Следующий запрос через %s с.", delay)
+                            if planning_failed:
+                                LOG.info("Новый план поиска будет запрошен через %s с.", delay)
+                            else:
+                                LOG.info("Новых вакансий в поиске нет. Следующий запрос через %s с.", delay)
                             control.wait_until(min(control.now() + delay, deadline))
                         else:
                             LOG.info("Поиск обработан. Создаю следующий запрос; в цикле проверено %s/%s, откликов %s/%s.",

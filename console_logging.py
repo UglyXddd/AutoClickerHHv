@@ -14,6 +14,7 @@ YELLOW = "\x1b[33m"
 RED = "\x1b[31m"
 EVENT_COLORS = {
     "not_suitable": ORANGE,
+    "vacancy_title_rejected": ORANGE,
     "requirements_missing": ORANGE,
     "applied": GREEN,
     "questionnaire": YELLOW,

@@ -13,8 +13,9 @@ import sqlite3
 import sys
 import time
 import uuid
+from http.client import HTTPException
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
@@ -32,7 +33,7 @@ class OpenAIError(RuntimeError):
 
 
 class OpenAIStop(OpenAIError):
-    """Ошибка ключа, бюджета или неизвестный результат платного запроса: остановка."""
+    """Ошибка доступа, бюджета или учёта расходов: остановка."""
 
 
 def validate_config(config):
@@ -147,6 +148,7 @@ def request_json(config, schema, instructions, data, *, purpose):
     validate_config(config)
     model = config["model"]
     maximum = config.get("max_output_tokens", 1600)
+    timeout = config.get("timeout_seconds", 90)
     payload = {"model": model, "store": False, "stream": False, "service_tier": "default",
                "reasoning": {"effort": config.get("reasoning_effort", "none")},
                "max_output_tokens": maximum, "instructions": instructions,
@@ -174,9 +176,11 @@ def request_json(config, schema, instructions, data, *, purpose):
         request = Request(ENDPOINT, data=encoded, headers={"Authorization": "Bearer " + key,
                           "Content-Type": "application/json"}, method="POST")
         try:
-            with build_opener(NoRedirect()).open(request, timeout=config.get("timeout_seconds", 90)) as response:
+            with build_opener(NoRedirect()).open(request, timeout=timeout) as response:
                 envelope = json.load(response)
         except HTTPError as exc:
+            if exc.code == 408 or 500 <= exc.code < 600:
+                raise OpenAIError(f"OpenAI: временная ошибка HTTP {exc.code}. Резерв сохранён; запрос не повторяется.") from None
             # При явной ошибке запроса/авторизации сервер не выполнил генерацию.
             if 400 <= exc.code < 500:
                 ledger.settle(call_id, 0)
@@ -184,16 +188,25 @@ def request_json(config, schema, instructions, data, *, purpose):
                         429: "OpenAI ограничил запросы или исчерпан баланс аккаунта.",
                         400: "OpenAI отклонил параметры запроса.", 404: "Модель OpenAI недоступна этому ключу."}
             raise OpenAIStop(messages.get(exc.code, f"OpenAI: HTTP {exc.code}.") + " Автоматических повторов не будет.") from None
-        except (URLError, TimeoutError, OSError, ValueError):
-            raise OpenAIStop("Нет корректного ответа OpenAI. Стоимость запроса неизвестна: резерв сохранён, автоматического повтора не будет.") from None
+        except (OSError, HTTPException) as exc:
+            if isinstance(exc, TimeoutError) or isinstance(getattr(exc, "reason", None), TimeoutError):
+                reason = f"Истёк тайм-аут OpenAI ({timeout} с)"
+            else:
+                reason = "Сбой соединения с OpenAI"
+            raise OpenAIError(f"{reason}. Резерв сохранён; запрос не повторяется.") from None
+        except ValueError:
+            raise OpenAIError("Ответ OpenAI не удалось прочитать как JSON. Резерв сохранён; запрос не повторяется.") from None
         if not isinstance(envelope, dict):
-            raise OpenAIStop("OpenAI вернул неизвестный формат ответа; резерв расходов сохранён.")
+            raise OpenAIError("Неизвестный формат ответа OpenAI. Резерв сохранён; запрос не повторяется.")
         charge = usage_cost(envelope.get("usage"), prices)
         ledger.settle(call_id, charge, envelope["usage"])
         LOG.info("OpenAI: %s | запрос ~$%.6f | всего учтено ~$%.4f / $%.2f", purpose, charge,
                  ledger.total(), config.get("budget_usd", 4.5))
         if envelope.get("status") != "completed":
-            raise OpenAIStop("OpenAI не завершил ответ. Проверьте лимит выходных токенов; новые запросы остановлены.")
+            details = envelope.get("incomplete_details")
+            if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
+                raise OpenAIError("OpenAI достиг лимита выходных токенов; результат не используется.")
+            raise OpenAIError("OpenAI не завершил ответ; результат не используется.")
         try:
             content = [part for item in envelope.get("output", []) if item.get("type") == "message"
                        for part in item.get("content", [])]
@@ -203,7 +216,7 @@ def request_json(config, schema, instructions, data, *, purpose):
             result = json.loads(text)
             if not isinstance(result, dict):
                 raise ValueError()
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError, AttributeError):
             raise OpenAIError("Модель не вернула корректный JSON; отклик не отправлен.") from None
         ledger.cache(cache_key, result)
         return {"data": result, "cached": False, "estimated_cost_usd": charge,

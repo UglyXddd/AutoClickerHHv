@@ -5,7 +5,7 @@
   "max_search_pages": 100,
   "max_applications": 400,
   "cycle_hours": 4,
-  "minimum_score": 70,
+  "minimum_score": 60,
   "review_again_after_hours": 24,
   "delay_seconds": 3,
   "search_query": "python backend",

@@ -83,13 +83,25 @@ class OpenAIClientTests(unittest.TestCase):
         self.assertEqual(self.total(), 4.0)
 
     def test_unknown_network_result_keeps_reservation_and_hides_secret(self):
-        with patch("openai_client.build_opener") as opener:
-            opener.return_value.open.side_effect = URLError("secret: " + FAKE_KEY)
-            with self.assertRaises(OpenAIStop) as error:
-                self.ask()
-            opener.return_value.open.assert_called_once()
-        self.assertNotIn(FAKE_KEY, str(error.exception))
-        self.assertGreater(self.total(), 0)
+        for failure, message in (
+            (URLError(FAKE_KEY), "Сбой соединения"),
+            (URLError(TimeoutError(FAKE_KEY)), "тайм-аут OpenAI"),
+            (HTTPError("https://api.openai.com/v1/responses", 408, FAKE_KEY, {}, None), "HTTP 408"),
+            (HTTPError("https://api.openai.com/v1/responses", 503, FAKE_KEY, {}, None), "HTTP 503"),
+            (io.BytesIO(FAKE_KEY.encode()), "прочитать как JSON"),
+        ):
+            with self.subTest(message=message), patch("openai_client.build_opener") as opener:
+                before = self.total()
+                if isinstance(failure, Exception):
+                    opener.return_value.open.side_effect = failure
+                else:
+                    opener.return_value.open.return_value = failure
+                with self.assertRaisesRegex(OpenAIError, message) as error:
+                    self.ask()
+                opener.return_value.open.assert_called_once()
+                self.assertNotIsInstance(error.exception, OpenAIStop)
+                self.assertNotIn(FAKE_KEY, str(error.exception))
+                self.assertGreater(self.total(), before)
 
     def test_explicit_auth_error_releases_reservation_without_retry(self):
         with patch("openai_client.build_opener") as opener:
@@ -103,12 +115,14 @@ class OpenAIClientTests(unittest.TestCase):
     def test_incomplete_refused_and_invalid_json_are_charged_and_rejected(self):
         for change in ({"status": "incomplete"},
                        {"output": [{"type": "message", "content": [{"type": "refusal"}]}]},
+                       {"output": [None]},
                        {"output": [{"type": "message", "content": [{"type": "output_text", "text": "bad"}]}]}):
             with self.subTest(change=change), patch("openai_client.build_opener") as opener:
                 before = self.total()
                 opener.return_value.open.return_value = io.BytesIO(json.dumps(self.envelope(**change)).encode())
-                with self.assertRaises(OpenAIError):
+                with self.assertRaises(OpenAIError) as error:
                     self.ask()
+                self.assertNotIsInstance(error.exception, OpenAIStop)
                 self.assertGreater(self.total(), before)
 
     def test_missing_usage_retains_full_reservation(self):

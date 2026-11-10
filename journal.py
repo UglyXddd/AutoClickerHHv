@@ -48,6 +48,15 @@ class Journal:
         self.db.execute("UPDATE search_rounds SET query=?, plan=? WHERE id=?",
                         (plan["query"], json.dumps(plan, ensure_ascii=False), round_id))
         self.db.commit()
+        self._append_jsonl("search-history.jsonl", {
+            "at": datetime.now(timezone.utc).isoformat(), "round": round_id, **plan,
+        })
+
+    def _append_jsonl(self, filename, record):
+        with (self.directory / filename).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
 
     def reviewed_recently(self, vacancy_id, signature, hours):
         row = self.db.execute(
@@ -68,20 +77,20 @@ class Journal:
         if vacancy:
             record.update({key: vacancy[key] for key in ("id", "title", "url")})
         record.update(details)
-        with (self.directory / "events.jsonl").open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(record, ensure_ascii=False) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        self._append_jsonl("events.jsonl", record)
         labels = {
             "run_started": "Начал обработку", "run_finished": "Обработка завершена",
             "bump_unavailable": "Поднятие пока недоступно", "would_bump": "Пробный запуск: поднял бы резюме",
             "bump_unconfirmed": "Поднятие не подтверждено", "vacancies_found": "Найдено новых вакансий",
             "bump_scheduled": "Запланировал проверку поднятия",
             "search_started": "Начал общий поиск",
+            "search_scope_reset": "Исправляю область поиска",
             "search_empty": "По запросу и фильтрам вакансий нет; продолжаю поиск",
             "search_planning": "OpenAI подбирает запрос и фильтры по резюме",
             "search_planned": "Подготовил поиск по резюме",
             "search_page": "Просмотрел страницу поиска", "vacancy_opened": "Открыл вакансию",
+            "vacancy_title_checked": "Заголовок прошёл первичную проверку",
+            "vacancy_title_rejected": "Пропустил вакансию по заголовку",
             "model_started": "Оцениваю вакансию и готовлю письмо", "vacancy_evaluated": "Оценил вакансию",
             "letter_prepared": "Подготовил сопроводительное письмо",
             "application_request_verified": "Запрос отклика проверен: письмо включено",

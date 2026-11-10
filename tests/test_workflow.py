@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright
 
 import actions
 from journal import Journal
-from letters import generate_letter
+from letters import assess_title, generate_letter
 from runtime_control import CycleExpired, CycleProgress
 from response_guard import read_fields
 from hh_ui import HumanRequired
@@ -93,6 +93,7 @@ class WorkflowTests(unittest.TestCase):
         self.text_captcha_required = False
         self.captcha_attempts = []
         self.search_pages = {0: [1, 2, 3]}
+        self.expected_search_query = "python backend"
         self.context = self.browser.new_context()
         self.addCleanup(self.context.close)
         self.context.route("http://hh.local/**", self.route)
@@ -101,6 +102,11 @@ class WorkflowTests(unittest.TestCase):
         self.origin_patch = patch.object(actions, "SITE_ORIGIN", "http://hh.local")
         self.origin_patch.start()
         self.addCleanup(self.origin_patch.stop)
+        self.title_patch = patch.object(actions, "assess_title", return_value={
+            "relevant": True, "reason": "Нужно проверить описание.", "cached": False,
+        })
+        self.title_model = self.title_patch.start()
+        self.addCleanup(self.title_patch.stop)
         self.model_patch = patch.object(actions, "generate_letter", return_value={
             "suitable": True, "score": 85, "reason": "Совпадает профессиональный стек.", "letter": LETTER,
             "requirements": [], "missing_requirements": [],
@@ -134,7 +140,8 @@ class WorkflowTests(unittest.TestCase):
         elif path == "/search/vacancy":
             self.assertNotIn("resume", query)
             self.assertNotIn("from", query)
-            self.assertEqual(query["text"], ["python backend"])
+            self.assertNotIn("search_field", query)
+            self.assertEqual(query["text"], [self.expected_search_query])
             self.assertEqual(query["area"], ["1"])
             page_index = int(query.get("page", [0])[0])
             body = "".join(f'<a data-qa="serp-item__title" href="/vacancy/{i}">Вакансия {i}</a>'
@@ -316,7 +323,7 @@ class WorkflowTests(unittest.TestCase):
     def test_model_plans_search_from_resume_before_collecting_vacancies(self):
         self.config["search_mode"] = "model"
         self.write_config()
-        plan = {"query": "python backend", "search_field": "name",
+        plan = {"query": "python backend",
                 "experience": ["noExperience", "between1And3"], "level": "middle",
                 "maximum_experience": "between1And3", "reason": "По подтверждённому опыту.", "cached": False}
         with patch.object(actions, "plan_search", return_value=plan) as planner:
@@ -334,15 +341,40 @@ class WorkflowTests(unittest.TestCase):
     def test_next_search_receives_persisted_previous_query_and_new_round(self):
         self.config["search_mode"] = "model"
         self.write_config()
-        plan = {"query": "python backend", "search_field": "name", "experience": ["between1And3"],
+        plan = {"query": "python backend", "experience": ["between1And3"],
                 "level": "middle", "reason": "По резюме.", "cached": False}
-        with patch.object(actions, "plan_search", return_value=plan) as planner:
+        next_plan = dict(plan, query="python fastapi")
+        with patch.object(actions, "plan_search", side_effect=[plan, next_plan]) as planner:
             self.run_task("search")
+            self.expected_search_query = next_plan["query"]
             self.run_task("search")
         self.assertEqual(planner.call_args_list[0].kwargs["previous_queries"], [])
         self.assertEqual(planner.call_args_list[1].kwargs["previous_queries"], [plan["query"]])
         self.assertGreater(planner.call_args_list[1].kwargs["round_number"],
                            planner.call_args_list[0].kwargs["round_number"])
+        history = (self.root / "output/search-history.jsonl").read_text(encoding="utf-8")
+        records = [json.loads(line) for line in history.splitlines()]
+        self.assertEqual([(r["round"], r["query"]) for r in records], [(1, plan["query"]), (2, next_plan["query"])])
+
+    def test_title_rejection_skips_card_full_analysis_and_submission(self):
+        self.search_pages = {0: [1]}
+        self.context.route("**/search/vacancy?*", lambda route: route.fulfill(
+            content_type="text/html; charset=utf-8",
+            body='<a data-qa="serp-item__title" href="/vacancy/1">Аналитик</a>',
+        ))
+        self.title_model.return_value = {"relevant": False, "reason": "Другая роль.", "cached": False}
+        self.run_task()
+        self.title_model.assert_called_once()
+        self.assertEqual(self.title_model.call_args.args[2], "Аналитик")
+        self.assertNotIn("PRIVATE_CONTACT", self.title_model.call_args.args[1])
+        self.assertEqual(urlparse(self.page.url).path, "/search/vacancy")
+        self.model.assert_not_called()
+        self.assertEqual(self.submissions, [])
+        with closing(sqlite3.connect(self.root / "output/state.sqlite3")) as db:
+            self.assertEqual(db.execute("SELECT score, reason FROM reviews WHERE id='1'").fetchone(),
+                             (None, "Другая роль."))
+        self.run_task()
+        self.title_model.assert_called_once()
 
     def test_review_pacing_and_quota_continue_across_search_passes(self):
         self.config["max_vacancies"] = 4
@@ -391,6 +423,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.model.call_count, 1)
         self.assertEqual(self.submissions, [])
 
+    def test_api_timeout_skips_vacancy_then_continues_without_replaying_request(self):
+        from openai_client import OpenAIError
+
+        self.search_pages = {0: [1, 2]}
+        control = FastControl()
+        self.model.side_effect = [OpenAIError("Истёк тайм-аут OpenAI (90 с)."), self.model.return_value]
+        self.run_task(control=control)
+        self.assertEqual(control.waits, [60])
+        self.assertEqual(self.model.call_count, 2)
+        self.assertTrue(self.model.call_args_list[0].args[3].startswith("Вакансия 1\n"))
+        self.assertTrue(self.model.call_args_list[1].args[3].startswith("Вакансия 2\n"))
+        self.assertEqual(self.favorites, {"2"})
+        self.assertEqual(self.submissions, [])
+
     def test_search_visits_own_and_lower_experience_separately_and_deduplicates(self):
         self.config["max_vacancies"] = 10
         self.config["search_filters"] = {"experience": ["noExperience", "between1And3"]}
@@ -410,6 +456,58 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(visited, ["between1And3", "noExperience"])
         saved = json.loads((self.root / "output/vacancies.json").read_text(encoding="utf-8"))
         self.assertEqual([vacancy["id"] for vacancy in saved], ["1", "2", "3"])
+
+    def test_search_pagination_removes_title_only_filter_from_site_links(self):
+        visited = []
+
+        def search(route):
+            query = parse_qs(urlparse(route.request.url).query)
+            visited.append(dict(query))
+            index = int(query.get("page", ["0"])[0])
+            body = f'<a data-qa="serp-item__title" href="/vacancy/{index + 1}">Вакансия {index + 1}</a>'
+            if index == 0:
+                query.update(page=["1"], search_field=["name"])
+                body += f'<a data-qa="pager-next" href="/search/vacancy?{urlencode(query, doseq=True)}">Дальше</a>'
+            route.fulfill(content_type="text/html; charset=utf-8", body=body)
+
+        self.context.route("**/search/vacancy?**", search)
+        self.run_task("search")
+        saved = json.loads((self.root / "output/vacancies.json").read_text(encoding="utf-8"))
+        self.assertEqual([vacancy["id"] for vacancy in saved], ["1", "2"])
+        self.assertEqual(len(visited), 2)
+        self.assertTrue(all("search_field" not in query for query in visited))
+
+    def test_search_page_restoring_title_only_filter_is_corrected_before_collection(self):
+        redirected = False
+
+        def search(route):
+            nonlocal redirected
+            restricted = not redirected
+            redirected = True
+            job_id = "999" if restricted else "123"
+            body = f'<a data-qa="serp-item__title" href="/vacancy/{job_id}">Вакансия</a>'
+            if restricted:
+                body += f'<script>history.replaceState(null, "", {json.dumps(route.request.url + "&search_field=name")})</script>'
+            route.fulfill(content_type="text/html; charset=utf-8", body=body)
+
+        self.context.route("**/search/vacancy?**", search)
+        self.run_task("search")
+        saved = json.loads((self.root / "output/vacancies.json").read_text(encoding="utf-8"))
+        self.assertEqual([vacancy["id"] for vacancy in saved], ["123"])
+        self.assertNotIn("search_field", parse_qs(urlparse(self.page.url).query))
+
+    def test_search_refuses_collection_when_site_keeps_restoring_title_only_filter(self):
+        def search(route):
+            route.fulfill(content_type="text/html; charset=utf-8", body=
+                          '<a data-qa="serp-item__title" href="/vacancy/999">Вакансия</a>'
+                          f'<script>history.replaceState(null, "", {json.dumps(route.request.url + "&search_field=name")})</script>')
+
+        self.context.route("**/search/vacancy?**", search)
+        with self.assertRaisesRegex(RuntimeError, "повторно включил ограничение"):
+            self.run_task("search")
+        self.assertFalse((self.root / "output/vacancies.json").exists())
+        self.assertEqual(self.submissions, [])
+        self.model.assert_not_called()
 
     def test_real_empty_hh_message_with_nonbreaking_spaces_continues_other_experience_band(self):
         self.config["max_vacancies"] = 10
@@ -625,14 +723,16 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.submissions), 1)
 
     def test_scores_below_threshold_are_cached_and_config_change_rechecks(self):
-        self.model.return_value = dict(self.model.return_value, score=69)
+        self.config["minimum_score"] = 65
+        self.write_config()
+        self.model.return_value = dict(self.model.return_value, score=60)
         self.run_task()
         self.assertEqual(self.submissions, [])
         self.assertEqual(self.favorites, set())
         self.assertEqual(self.model.call_count, 3)
         self.run_task()
         self.assertEqual(self.model.call_count, 3)
-        self.config["minimum_score"] = 60
+        del self.config["minimum_score"]  # Default is now 60, inclusive.
         self.write_config()
         self.run_task()
         self.assertEqual(len(self.submissions), 1)
@@ -700,6 +800,14 @@ class WorkflowTests(unittest.TestCase):
 
 
 class OpenAIAdapterTests(unittest.TestCase):
+    def test_title_screening_only_sends_resume_and_search_result_title(self):
+        model_result = {"relevant": False, "reason": "Основная роль — аналитик."}
+        with patch("letters.request_json", return_value={"data": model_result, "cached": False}) as request:
+            result = assess_title({"model": "test"}, MODEL_RESUME, "  Аналитик  ")
+        self.assertEqual(request.call_args.args[3], {"resume": MODEL_RESUME, "title": "Аналитик"})
+        self.assertEqual(request.call_args.kwargs["purpose"], "vacancy_title_review")
+        self.assertEqual(result, {**model_result, "cached": False})
+
     def test_valid_structured_letter_and_request(self):
         with patch("letters.request_json", return_value={"data": dict(MODEL_PARTS)}) as request:
             result = generate_letter({"model": "test"}, "Кратко", MODEL_RESUME, "Вакансия")

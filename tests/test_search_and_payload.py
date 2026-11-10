@@ -11,16 +11,19 @@ class SearchTests(unittest.TestCase):
         query = parse_qs(urlparse(search_url({"search_query": "python backend", "search_location": "moscow_any",
             "search_filters": {"resume": "old", "from": "resumelist", "work_format": "REMOTE", "items_on_page": 50}})).query)
         self.assertEqual(query["area"], ["1"])
-        self.assertEqual(query["search_field"], ["name"])
+        self.assertNotIn("search_field", query)
         self.assertEqual(query["text"], ["python backend"])
         self.assertEqual(query["items_on_page"], ["20"])
         self.assertNotIn("resume", query)
         self.assertNotIn("work_format", query)
 
     def test_russia_remote_filters_are_preserved_on_url(self):
-        query = parse_qs(urlparse(search_url({"search_query": "Python", "search_location": "russia_remote"})).query)
+        query = parse_qs(urlparse(search_url({"search_query": "python sqlalchemy", "search_location": "russia_remote",
+            "search_filters": {"search_field": "name"}})).query)
         self.assertEqual(query["area"], ["113"])
         self.assertEqual(query["work_format"], ["REMOTE"])
+        self.assertEqual(query["text"], ["python sqlalchemy"])
+        self.assertNotIn("search_field", query)
 
 
 class PayloadTests(unittest.TestCase):

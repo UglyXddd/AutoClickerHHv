@@ -10,7 +10,7 @@ from search_planner import EXPERIENCE, RepeatedSearchQuery, plan_search
 from journal import Journal
 
 
-PLAN = {"query": "python backend", "search_field": "name", "maximum_experience": "between3And6",
+PLAN = {"query": "python backend", "maximum_experience": "between3And6",
         "level": "senior", "reason": "Подтверждённый опыт разработки Python API."}
 
 
@@ -29,14 +29,15 @@ class SearchPlannerTests(unittest.TestCase):
         plan = self.plan()
         for location, area in (("moscow_any", "1"), ("russia_remote", "113")):
             result = parse_qs(urlparse(search_url({"search_query": plan["query"], "search_location": location,
-                "search_filters": {"search_field": plan["search_field"], "experience": plan["experience"],
+                "search_filters": {"search_field": "name", "experience": plan["experience"],
                                    "area": "other", "work_format": "OFFICE"}})).query)
             self.assertEqual(result["experience"], EXPERIENCE[:3])
+            self.assertNotIn("search_field", result)
             self.assertEqual(result["area"], [area])
             self.assertEqual(result.get("work_format"), ["REMOTE"] if location == "russia_remote" else None)
 
     def test_unknown_filters_or_url_instead_of_query_are_rejected(self):
-        for change in ({"query": ""}, {"query": "https://example.com"}, {"search_field": "everything"},
+        for change in ({"query": ""}, {"query": "https://example.com"},
                        {"maximum_experience": "guru"}, {"level": "unknown"}):
             with self.subTest(change=change), self.assertRaises(OpenAIError):
                 self.plan(dict(PLAN, **change))
@@ -55,7 +56,7 @@ class SearchPlannerTests(unittest.TestCase):
                 self.plan(previous_queries=[old])
 
     def test_user_examples_are_valid_short_phrases(self):
-        for phrase in ("python backend", "python fastapi", "python junior backend", "python разработчик"):
+        for phrase in ("python backend", "python fastapi", "python junior backend", "python разработчик", "python sqlalchemy"):
             with self.subTest(phrase=phrase):
                 self.assertEqual(self.plan(dict(PLAN, query=phrase))["query"], phrase)
 

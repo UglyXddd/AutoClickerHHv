@@ -17,7 +17,7 @@ from playwright.sync_api import Error as PlaywrightError, Page, TimeoutError as 
 
 from hh_ui import HumanRequired, SessionRequired, check_challenge, navigate
 from journal import Journal
-from letters import LetterGenerationError, generate_letter
+from letters import LetterGenerationError, assess_title, generate_letter
 from runtime_control import CycleExpired, CycleProgress, RunControl, RunStopped
 from response_guard import ResponseGuard
 from openai_client import OpenAIError, OpenAIStop
@@ -60,7 +60,7 @@ def load_config(path: Path) -> dict:
         raise RuntimeError("main_resume_url должен иметь вид https://hh.ru/resume/<идентификатор>.")
     config["resume_id"] = match[1]
     config.setdefault("cycle_hours", 4)
-    config.setdefault("minimum_score", 70)
+    config.setdefault("minimum_score", 60)
     config.setdefault("review_again_after_hours", 24)
     config.setdefault("search_query", "python backend")
     config.setdefault("search_location", "moscow_any")
@@ -182,9 +182,8 @@ def bump_all(page: Page, journal: Journal, *, dry_run: bool, checkpoint=no_check
 
 def search_url(config: dict) -> str:
     filters = dict(config.get("search_filters", {}))
-    for key in ("resume", "from", "work_format", "schedule"):
+    for key in ("resume", "from", "work_format", "schedule", "search_field"):
         filters.pop(key, None)
-    filters.setdefault("search_field", "name")
     filters.setdefault("order_by", "publication_time")
     # hh.ru отдаёт первые 20 карточек сразу; более крупные страницы требуют
     # дополнительной подгрузки. Небольшие страницы не теряют эти вакансии.
@@ -194,6 +193,15 @@ def search_url(config: dict) -> str:
     if config["search_location"] == "russia_remote":
         filters["work_format"] = "REMOTE"
     return SITE_ORIGIN + "/search/vacancy?" + urlencode(filters, doseq=True)
+
+
+def unrestricted_search_url(url: str) -> str:
+    parsed = urlparse(url)
+    filters = parse_qs(parsed.query, keep_blank_values=True)
+    if "search_field" not in filters:
+        return url
+    filters.pop("search_field")
+    return parsed._replace(query=urlencode(filters, doseq=True)).geturl()
 
 
 def collect_vacancies(page: Page, config: dict, *, journal: Journal | None = None,
@@ -217,11 +225,18 @@ def collect_vacancies(page: Page, config: dict, *, journal: Journal | None = Non
         checkpoint()
         if not pending:
             break
-        current_url = pending.popleft()
+        current_url = unrestricted_search_url(pending.popleft())
         if current_url in visited:
             continue
         visited.add(current_url)
         navigate(page, current_url)
+        if "search_field" in parse_qs(urlparse(page.url).query, keep_blank_values=True):
+            if journal:
+                journal.event("search_scope_reset", note="Убираю восстановленное ограничение области поиска.")
+            navigate(page, unrestricted_search_url(internal_url(page.url)))
+            if "search_field" in parse_qs(urlparse(page.url).query, keep_blank_values=True):
+                raise RuntimeError("hh.ru повторно включил ограничение области поиска. "
+                                   "Сбор вакансий остановлен, чтобы не использовать поиск только по названию.")
         links = page.locator(TITLE_LINKS)
         while True:
             try:
@@ -290,7 +305,7 @@ def collect_vacancies(page: Page, config: dict, *, journal: Journal | None = Non
                     href = candidate
                     break
         if href:
-            pending.append(internal_url(href))
+            pending.append(unrestricted_search_url(internal_url(href)))
     return list(found.values())
 
 
@@ -481,6 +496,14 @@ def apply_one(page: Page, vacancy: dict, config: dict, journal: Journal,
     if previous:
         journal.event("skipped_history", vacancy=vacancy, note=previous)
         return False
+    title_review = assess_title(config["openai"], resume_text, vacancy["title"])
+    checkpoint()
+    title_event = "vacancy_title_checked" if title_review["relevant"] else "vacancy_title_rejected"
+    journal.event(title_event, vacancy=vacancy, note=title_review["reason"], cached=title_review["cached"])
+    if not title_review["relevant"]:
+        if not dry_run:
+            journal.record_review(vacancy, signature, None, title_review["reason"])
+        return False
     navigate(page, vacancy["url"])
     journal.event("vacancy_opened", vacancy=vacancy)
     if already_applied(page):
@@ -568,7 +591,7 @@ def run_actions(page: Page, *, task: str = "bump", config_path: Path | None = No
             resume_title, resume_text = perform(lambda active: read_resume(active, config, checkpoint=checkpoint))
         if task in {"apply", "all"}:
             signature = hashlib.sha256(json.dumps(
-                [resume_text, instructions, config["minimum_score"], config["openai"]],
+                ["title-screening-v1", resume_text, instructions, config["minimum_score"], config["openai"]],
                 ensure_ascii=False, sort_keys=True,
             ).encode("utf-8")).hexdigest()
         if config["search_mode"] == "model":
@@ -586,7 +609,7 @@ def run_actions(page: Page, *, task: str = "bump", config_path: Path | None = No
             journal.record_search_plan(round_id, plan)
             config["search_query"] = plan["query"]
             config["search_filters"] = dict(config.get("search_filters", {}),
-                                            search_field=plan["search_field"], experience=plan["experience"])
+                                            experience=plan["experience"])
             (journal.directory / "search-plan.json").write_text(
                 json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
             journal.event("search_planned", note=f'{plan["query"]}; уровень {plan["level"]}; опыт {", ".join(plan["experience"])}. {plan["reason"]}',
