@@ -8,6 +8,7 @@ if not exist ".venv\Scripts\python.exe" (
     pause
     exit /b 1
 )
+if "%~1"=="" start "JobFinder Telegram" "%ComSpec%" /d /c start-telegram.cmd --wait-resume 300
 ".venv\Scripts\python.exe" main.py %*
 set "HH_BROWSER_EXIT=%ERRORLEVEL%"
 pause

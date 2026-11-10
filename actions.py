@@ -7,6 +7,7 @@ import hashlib
 import logging
 import math
 import re
+import tempfile
 import time
 from datetime import datetime, timedelta
 from collections import deque
@@ -39,6 +40,7 @@ EMPTY_SEARCH = re.compile(
     r"ваканси[йи]\s+не\s+найден[оы]|найдено\s+0\s+вакансий", re.I)
 LETTER_INPUT = 'textarea[data-qa="vacancy-response-popup-form-letter-input"], textarea[name="letter"]'
 LOG = logging.getLogger("hh_browser")
+RESUME_SNAPSHOT = "resume-profile.json"
 
 
 class LetterDeliveryError(RuntimeError):
@@ -351,7 +353,22 @@ def read_resume(page: Page, config: dict, *, checkpoint=no_checkpoint) -> tuple[
     ).all_inner_texts()
     if not sections:
         raise RuntimeError("Не удалось прочитать профессиональные разделы основного резюме.")
-    return title, title + "\n\n" + "\n\n".join(sections)
+    resume = title + "\n\n" + "\n\n".join(sections)
+    temporary = None
+    try:
+        config["output"].mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=config["output"], delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({"resume_id": config["resume_id"], "text": resume}, stream, ensure_ascii=False)
+        temporary.replace(config["output"] / RESUME_SNAPSHOT)
+    except OSError as exc:
+        LOG.warning("Не удалось сохранить текст резюме для Telegram-поиска: %s", exc)
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return title, resume
 
 
 def choose_resume(page: Page, resume_id: str, resume_title: str, *, checkpoint=no_checkpoint) -> None:

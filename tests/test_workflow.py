@@ -330,6 +330,8 @@ class WorkflowTests(unittest.TestCase):
             self.run_task("search")
         self.assertIn("Python", planner.call_args.args[1])
         self.assertNotIn("PRIVATE_CONTACT", planner.call_args.args[1])
+        snapshot = json.loads((self.root / "output" / actions.RESUME_SNAPSHOT).read_text(encoding="utf-8"))
+        self.assertEqual(snapshot, {"resume_id": RESUME_ID, "text": planner.call_args.args[1]})
         self.assertEqual(planner.call_args.kwargs, {"location": "moscow_any", "include_lower": True,
                                                   "previous_queries": [], "round_number": 1})
         saved = json.loads((self.root / "output/search-plan.json").read_text(encoding="utf-8"))
