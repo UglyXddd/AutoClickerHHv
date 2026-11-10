@@ -23,6 +23,7 @@
     "timeout_seconds": 90
   },
   "letter_instructions_file": "letter_style.txt",
+  "telegram_candidate_city": "Москва",
   "telegram": {
     "enabled": true,
     "token_file": ".telegram-bot-token",

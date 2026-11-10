@@ -44,30 +44,43 @@ class TelegramJobTests(unittest.TestCase):
         post = jobs.ChannelPreview(card("job_python/11", 8, 'Python-разработчик. '
                                    '<a href="https://t.me/team_hiring">Откликнуться</a>')).posts[0]
         other = jobs.ChannelPreview(card("job_python/12", 9, "Python Backend, отклик hr@example.com")).posts[0]
+        body = "Пишу по вакансии Python-разработчика. Мой стек — Python и FastAPI."
+        resume = "Python, FastAPI. Опыт работы в компании «Щёлково Агрохим»."
         match = {"title": "Python-разработчик", "company": "Тест", "score": 60,
-                 "reason": "Совпадает опыт FastAPI.", "contact_indices": [0],
-                 "message_body": "Пишу по вакансии Python-разработчика. Мой стек — Python и FastAPI.",
+                 "reason": "Совпадает опыт FastAPI.", "contact_indices": [0], "residence_requested": False,
+                 "message_body": body + " Живу в г. Щёлково.",
                  "missing_details": "Ожидания по зарплате"}
         options = [(post, jobs.contact_options(post)), (other, jobs.contact_options(other))]
         response = {"data": {"matches": [dict(match, score=59), dict(match, contact_indices=[8]), match]}}
         with TemporaryDirectory() as temporary:
-            config = {"minimum_score": 60, "search_location": "moscow_any", "openai": {}, "output": Path(temporary)}
+            config = {"minimum_score": 60, "search_location": "moscow_any", "telegram_candidate_city": "Москва",
+                      "openai": {}, "output": Path(temporary)}
             with (patch.object(jobs, "collect_posts", return_value=(options, False)),
                   patch.object(jobs, "load_api_key"),
                   patch.object(jobs, "enable_terminal_colors", return_value=True),
                   patch.object(jobs, "request_json", side_effect=[response, OpenAIError("тайм-аут")]) as api,
                   self.assertLogs(jobs.LOG, level="INFO") as logs,
                   redirect_stdout(io.StringIO()) as console):
-                self.assertEqual(jobs.run_scan(config, "Python, FastAPI", 30, prompt_key=False), 1)
+                self.assertEqual(jobs.run_scan(config, resume, 30, prompt_key=False), 1)
             report = (Path(temporary) / jobs.REPORT).read_text(encoding="utf-8")
-        self.assertEqual(report, "https://t.me/team_hiring\n\nЗдравствуйте!\n\n"
-                         f"{match['message_body']}\n\n[Допишите перед отправкой: Ожидания по зарплате]\n\n"
+        self.assertEqual(report, "https://t.me/team_hiring\nПост: https://t.me/job_python/11\n\nЗдравствуйте!\n\n"
+                         f"{body}\n\n[Допишите перед отправкой: Ожидания по зарплате]\n\n"
                          f"Прикрепляю резюме. Буду рад обсудить детали!\n{jobs.SEPARATOR}\n{jobs.SEPARATOR}\n\n")
         self.assertIn("https://t.me/job_python/11", console.getvalue())
         self.assertIn(jobs.RESULT_COLOR + jobs.SEPARATOR, console.getvalue())
         self.assertIn(jobs.SEPARATOR + jobs.RESET, console.getvalue())
         self.assertIn("Проверка неполная", logs.output[-1])
-        self.assertEqual(api.call_args_list[0].args[3]["resume"], "Python, FastAPI")
+        self.assertEqual(api.call_args_list[0].args[3]["resume"], resume)
+        self.assertEqual(api.call_args_list[0].args[3]["candidate_city"], "Москва")
+
+    def test_requested_residence_comes_from_settings_not_from_employer_city(self):
+        item = {"title": "Python-разработчик", "message_body": "В компании «Щёлково Агрохим» работал над API. Я в Щёлково.",
+                "residence_requested": True, "missing_details": ""}
+        draft = jobs.format_draft(item, "Москва")
+        self.assertIn("Город проживания — Москва.", draft)
+        self.assertIn("В компании «Щёлково Агрохим» работал над API.", draft)
+        self.assertNotIn("Я в Щёлково.", draft)
+        self.assertIn("[Укажите город проживания.]", jobs.format_draft(item, None))
 
     def test_uses_only_a_snapshot_of_the_selected_resume(self):
         with TemporaryDirectory() as temporary:
